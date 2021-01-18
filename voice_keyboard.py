@@ -1,21 +1,34 @@
 #!/usr/bin/env python3
+"""
+2021 January 17
+James Whong
+This is a simple voice keyboard, tested on Ubuntu 20.
+First install the requirements listed in requirements.txt
+
+When you run this script, it will listen to the keyboard. When PRESS_TO_TALK_COMBO is detected (default cmd+alt),
+the script will start recording the microphone until the combo is released.
+The recorded clip is then sent to the Google speech recognition service and converted to text.
+The text is then typed into the keyboard, so it will appear in whatever text box has focus at the time.
+"""
 
 import speech_recognition as sr
 import pyaudio as pa
 from pynput import keyboard
 from threading import Semaphore
 
-# Some magic numbers
+# When set to true, plays back recorded audio before sending it up for speech recognition
+PLAYBACK=False
+# While pressed, this script records the default microphone
+# When released, sends the audio clip to Google's speech recognition API
+PRESS_TO_TALK_COMBO=(keyboard.Key.alt, keyboard.Key.cmd)
+
+# Default audio parameters
 CHUNK_SIZE = 1024
 SAMPLE_RATE = 44100
 SAMPLE_WIDTH = 2
 N_CHANNELS = 1
 
-# When true, plays back recorded audio before sending it up for speech recognition
-PLAYBACK=False
-
 def audioToText(audio:sr.AudioData)->str:
-    # recognize speech using Google Speech Recognition
     try:
         # for testing purposes, we're just using the default API key
         # to use another API key, use `r.recognize_google(audio, key="GOOGLE_SPEECH_RECOGNITION_API_KEY")`
@@ -39,20 +52,17 @@ def playAudio(audio:sr.AudioData)->None:
                     channels=1,
                     rate=audio.sample_rate,
                     output=True)
-
-    # play stream (3)
     for i in range(0, len(audio.frame_data)*audio.sample_width, chunk_size_bytes):
         chunk = audio.frame_data[i:i+chunk_size_bytes]
         stream.write(chunk)
-
-    # stop stream (4)
     stream.stop_stream()
     stream.close()
-
-    # close PyAudio (5)
     p.terminate()
 
 class MyKeyController(object):
+    """Utility class to check for a specific key combination.
+    Signals a semaphore when key combination is pressed.
+    Combo status can be checked with isComboPressed"""
     def __init__(self, listen_for_combo=(keyboard.Key.alt, keyboard.Key.cmd), sem_to_signal=None):
         self.kb = keyboard.Controller()
         self.key_combo = set(listen_for_combo)
@@ -60,16 +70,16 @@ class MyKeyController(object):
         self.combo_pressed = False
         self.sem_to_signal = sem_to_signal
         listener = keyboard.Listener(
-            on_press=self.onPress,
-            on_release=self.onRelease)
+            on_press=self.__onPress,
+            on_release=self.__onRelease)
         listener.start()
-    def onPress(self, key):
+    def __onPress(self, key):
         if key in self.key_combo:
             self.pressed_keys.add(key)
             if (self.pressed_keys == self.key_combo) and not self.combo_pressed:
                 self.combo_pressed = True
                 if self.sem_to_signal: self.sem_to_signal.release()
-    def onRelease(self, key):
+    def __onRelease(self, key):
         if key in self.pressed_keys:
             self.pressed_keys.remove(key)
             if self.combo_pressed:
@@ -98,7 +108,10 @@ def recordWhile(cb_returns_true)->sr.AudioData:
     return sr.AudioData(b''.join(frames), SAMPLE_RATE, SAMPLE_WIDTH)
 
 class MyTextFormatter(object):
-    SENTENCE_ENDINGS = ('.','?','!')
+    """The speech to text conversion doesn't pad its returned values with spaces, so if you invoke this multiple times
+    in a row your textwillstackup. This class just spaces out the text between invocations, and also capitalizes the first
+    word if the last thing we remember sending was the end of a sentence."""
+    SENTENCE_ENDINGS = ('.', '?', '!')
     def __init__(self):
         self.capitalization_due = True
     def process(self, input:str)->str:
@@ -113,13 +126,15 @@ class MyTextFormatter(object):
         return ''.join(working)
 
 if __name__ == "__main__":
-    # obtain audio from the microphone
+    print("Voice keyboard starting...")
+
     sem = Semaphore(0)
     recognizer = sr.Recognizer()
-    key_controller = MyKeyController(sem_to_signal=sem)
+    key_controller = MyKeyController(listen_for_combo=PRESS_TO_TALK_COMBO, sem_to_signal=sem)
     formatter = MyTextFormatter()
 
     while True:
+        print("Waiting for key combo...")
         sem.acquire()
         print("Recording...")
         audio = recordWhile(key_controller.isComboPressed)
