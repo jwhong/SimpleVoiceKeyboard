@@ -3,7 +3,6 @@
 import speech_recognition as sr
 import pyaudio as pa
 from pynput import keyboard
-from time import sleep
 from threading import Semaphore
 
 # Some magic numbers
@@ -112,7 +111,6 @@ class MyTextFormatter(object):
             self.capitalization_due = True
         working.append(' ')
         return ''.join(working)
-
 
 if __name__ == "__main__":
     # obtain audio from the microphone
