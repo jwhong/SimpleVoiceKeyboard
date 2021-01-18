@@ -30,6 +30,9 @@ SAMPLE_RATE = 44100
 SAMPLE_WIDTH = 2
 N_CHANNELS = 1
 
+#Instantiate PyAudio once and share it
+global_p = pa.PyAudio()
+
 def audioToText(recognizer:sr.Recognizer, audio:sr.AudioData)->str:
     try:
         # for testing purposes, we're just using the default API key
@@ -50,10 +53,10 @@ def audioToText(recognizer:sr.Recognizer, audio:sr.AudioData)->str:
     return ""
 
 def playAudio(audio:sr.AudioData)->None:
-    p = pa.PyAudio()
+    global global_p
 
     chunk_size_bytes = CHUNK_SIZE * audio.sample_width
-    stream = p.open(format=p.get_format_from_width(audio.sample_width),
+    stream = global_p.open(format=global_p.get_format_from_width(audio.sample_width),
                     channels=1,
                     rate=audio.sample_rate,
                     output=True)
@@ -62,7 +65,6 @@ def playAudio(audio:sr.AudioData)->None:
         stream.write(chunk)
     stream.stop_stream()
     stream.close()
-    p.terminate()
 
 class MyKeyController(object):
     """Utility class to check for a specific key combination.
@@ -95,8 +97,8 @@ def recordWhile(cb_returns_true)->sr.AudioData:
     """Records audio and polls the provided callback.
     When the callback returns false, recording is terminated and the recorded clip returned as AudioData.
     Expect the callback to be polled at SAMPLE_RATE/CHUNK_SIZE = 44100Hz/1024 = 43.07Hz"""
-    p = pa.PyAudio()
-    stream = p.open(format=p.get_format_from_width(SAMPLE_WIDTH),
+    global global_p
+    stream = global_p.open(format=global_p.get_format_from_width(SAMPLE_WIDTH),
                     channels=N_CHANNELS,
                     rate=SAMPLE_RATE,
                     input=True,
@@ -107,7 +109,6 @@ def recordWhile(cb_returns_true)->sr.AudioData:
         frames.append(data)
     stream.stop_stream()
     stream.close()
-    p.terminate()
     return sr.AudioData(b''.join(frames), SAMPLE_RATE, SAMPLE_WIDTH)
 
 class MyTextFormatter(object):
