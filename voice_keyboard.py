@@ -21,6 +21,8 @@ PLAYBACK=False
 # While pressed, this script records the default microphone
 # When released, sends the audio clip to Google's speech recognition API
 PRESS_TO_TALK_COMBO=(keyboard.Key.alt, keyboard.Key.cmd)
+# What conversion backend to use?  Accepts "GOOGLE" and "SPHINX"
+BACKEND = "GOOGLE"
 
 # Default audio parameters
 CHUNK_SIZE = 1024
@@ -28,21 +30,24 @@ SAMPLE_RATE = 44100
 SAMPLE_WIDTH = 2
 N_CHANNELS = 1
 
-def audioToText(audio:sr.AudioData)->str:
+def audioToText(recognizer:sr.Recognizer, audio:sr.AudioData)->str:
     try:
         # for testing purposes, we're just using the default API key
         # to use another API key, use `r.recognize_google(audio, key="GOOGLE_SPEECH_RECOGNITION_API_KEY")`
         # instead of `r.recognize_google(audio)`
-        return recognizer.recognize_google(audio)
+        if BACKEND == "GOOGLE":
+            return recognizer.recognize_google(audio)
+        elif BACKEND == "SPHINX":
+            return recognizer.recognize_sphinx(audio)
+        else:
+            raise Exception("Invalid BACKEND value: %s"%BACKEND)
     except sr.UnknownValueError:
-        print("Google Speech Recognition could not understand audio")
-        return ""
+        print("Could not understand audio")
     except sr.RequestError as e:
-        print("Could not request results from Google Speech Recognition service; {0}".format(e))
-        return ""
+        print("Could not request results; {0}".format(e))
     except Exception as e:
         print("Unhandled exception occurred in audioToText: ", e)
-        return ""
+    return ""
 
 def playAudio(audio:sr.AudioData)->None:
     p = pa.PyAudio()
@@ -87,24 +92,22 @@ class MyKeyController(object):
     def isComboPressed(self): return self.combo_pressed
 
 def recordWhile(cb_returns_true)->sr.AudioData:
+    """Records audio and polls the provided callback.
+    When the callback returns false, recording is terminated and the recorded clip returned as AudioData.
+    Expect the callback to be polled at SAMPLE_RATE/CHUNK_SIZE = 44100Hz/1024 = 43.07Hz"""
     p = pa.PyAudio()
     stream = p.open(format=p.get_format_from_width(SAMPLE_WIDTH),
                     channels=N_CHANNELS,
                     rate=SAMPLE_RATE,
                     input=True,
                     output=False)
-    # read data
     frames = []
     while cb_returns_true():
         data = stream.read(CHUNK_SIZE)
         frames.append(data)
-
-    # stop stream (4)
     stream.stop_stream()
     stream.close()
     p.terminate()
-
-    # Stitch together into AudioData
     return sr.AudioData(b''.join(frames), SAMPLE_RATE, SAMPLE_WIDTH)
 
 class MyTextFormatter(object):
@@ -143,7 +146,7 @@ if __name__ == "__main__":
         if PLAYBACK:
             print("Playing back...")
             playAudio(audio)
-        text = audioToText(audio)
+        text = audioToText(recognizer, audio)
         if text:
             text = formatter.process(text)
             print("Sending to keyboard: ", text)
