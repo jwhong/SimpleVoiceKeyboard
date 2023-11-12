@@ -15,54 +15,85 @@ import speech_recognition as sr
 import pyaudio as pa
 from pynput import keyboard
 from threading import Semaphore
+import os
+from google.cloud import speech
 
-# When set to true, plays back recorded audio before sending it up for speech recognition
-PLAYBACK=False
 # While pressed, this script records the default microphone
 # When released, sends the audio clip to Google's speech recognition API
-PRESS_TO_TALK_COMBO=(keyboard.Key.alt, keyboard.Key.cmd)
-# What conversion backend to use?  Accepts "GOOGLE" and "SPHINX"
-BACKEND = "GOOGLE"
+PRESS_TO_TALK_COMBO=(keyboard.Key.ctrl, keyboard.Key.cmd)
 
 # Default audio parameters
-CHUNK_SIZE = 1024
-SAMPLE_RATE = 44100
+SAMPLE_RATE = 44100 # Can be set to 16000 for lower bandwidth, but empirically I see better results with 44100
+CHUNK_SIZE = 1024 * 10
 SAMPLE_WIDTH = 2
 N_CHANNELS = 1
 
 #Instantiate PyAudio once and share it
 global_p = pa.PyAudio()
 
-def audioToText(recognizer:sr.Recognizer, audio:sr.AudioData)->str:
-    try:
-        # for testing purposes, we're just using the default API key
-        # to use another API key, use `r.recognize_google(audio, key="GOOGLE_SPEECH_RECOGNITION_API_KEY")`
-        # instead of `r.recognize_google(audio)`
-        if BACKEND == "GOOGLE":
-            return recognizer.recognize_google(audio)
-        elif BACKEND == "SPHINX":
-            return recognizer.recognize_sphinx(audio)
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "PATH_TO_YOUR_KEYFILE.json"
+
+def newWordGenerator(responses):
+    transcript_cache = ''
+    def getNewPart(transcript, old_part)->str:
+        i = 0
+        if transcript.startswith(old_part):
+            i = 0
+        elif j := transcript.rfind(old_part) != -1:
+            i = j
+        new_part = transcript[len(old_part) + i:]
+        if new_part:
+            return transcript, new_part
         else:
-            raise Exception("Invalid BACKEND value: %s"%BACKEND)
-    except sr.UnknownValueError:
-        print("Could not understand audio")
-    except sr.RequestError as e:
-        print("Could not request results; {0}".format(e))
-    except Exception as e:
-        print("Unhandled exception occurred in audioToText: ", e)
-    return ""
+            return old_part, ''
 
-def playAudio(audio:sr.AudioData)->None:
-    global global_p
+    for response in responses:
+        if not response.results:
+            continue
+        result = response.results[0]
+        if not result.alternatives:
+            continue
 
-    chunk_size_bytes = CHUNK_SIZE * audio.sample_width
-    stream = global_p.open(format=global_p.get_format_from_width(audio.sample_width),
-                    channels=1,
-                    rate=audio.sample_rate,
-                    output=True)
-    for i in range(0, len(audio.frame_data)*audio.sample_width, chunk_size_bytes):
-        chunk = audio.frame_data[i:i+chunk_size_bytes]
-        stream.write(chunk)
+        transcript = result.alternatives[0].transcript
+
+        new_part = ''
+        if result.stability > 0.8:
+            transcript_cache, new_part = getNewPart(transcript, transcript_cache)
+        elif result.is_final:
+            _, new_part = getNewPart(transcript, transcript_cache)
+            transcript_cache = ''
+        if new_part:
+            yield new_part
+
+def runVoiceKeyboard(run_while_returns_true):
+    client = speech.SpeechClient()
+    streaming_config = speech.StreamingRecognitionConfig(
+        config=speech.RecognitionConfig(
+            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=SAMPLE_RATE,
+            language_code="en-US",
+            profanity_filter=False,
+            enable_spoken_punctuation=True,
+            enable_automatic_punctuation=False,
+            max_alternatives=0,
+        ),
+        single_utterance=False,
+        interim_results=True,
+    )
+
+    stream = global_p.open(format=global_p.get_format_from_width(SAMPLE_WIDTH),
+                           channels=N_CHANNELS,
+                           rate=SAMPLE_RATE,
+                           input=True,
+                           output=False)
+    def audioRequestGenerator():
+        while run_while_returns_true():
+            yield speech.StreamingRecognizeRequest(audio_content=stream.read(CHUNK_SIZE))
+    print("Recognition running...")
+    responses = client.streaming_recognize(streaming_config, requests=audioRequestGenerator())
+    for x in newWordGenerator(responses):
+        print(x)
+        yield x
     stream.stop_stream()
     stream.close()
 
@@ -93,24 +124,6 @@ class MyKeyController(object):
                 self.combo_pressed = False
     def isComboPressed(self): return self.combo_pressed
 
-def recordWhile(cb_returns_true)->sr.AudioData:
-    """Records audio and polls the provided callback.
-    When the callback returns false, recording is terminated and the recorded clip returned as AudioData.
-    Expect the callback to be polled at SAMPLE_RATE/CHUNK_SIZE = 44100Hz/1024 = 43.07Hz"""
-    global global_p
-    stream = global_p.open(format=global_p.get_format_from_width(SAMPLE_WIDTH),
-                    channels=N_CHANNELS,
-                    rate=SAMPLE_RATE,
-                    input=True,
-                    output=False)
-    frames = []
-    while cb_returns_true():
-        data = stream.read(CHUNK_SIZE)
-        frames.append(data)
-    stream.stop_stream()
-    stream.close()
-    return sr.AudioData(b''.join(frames), SAMPLE_RATE, SAMPLE_WIDTH)
-
 class MyTextFormatter(object):
     """The speech to text conversion doesn't pad its returned values with spaces, so if you invoke this multiple times
     in a row your textwillstackup. This class just spaces out the text between invocations, and also capitalizes the first
@@ -126,7 +139,7 @@ class MyTextFormatter(object):
             self.capitalization_due = False
         if working[-1] in MyTextFormatter.SENTENCE_ENDINGS:
             self.capitalization_due = True
-        working.append(' ')
+            working.append(' ')
         return ''.join(working)
 
 if __name__ == "__main__":
@@ -140,16 +153,7 @@ if __name__ == "__main__":
     while True:
         print("Waiting for key combo...")
         sem.acquire()
-        print("Recording...")
-        audio = recordWhile(key_controller.isComboPressed)
-        audio_length = len(audio.frame_data) / (audio.sample_rate * audio.sample_width)
-        print("Received audio of length %0.1fs" % audio_length)
-        if PLAYBACK:
-            print("Playing back...")
-            playAudio(audio)
-        text = audioToText(recognizer, audio)
-        if text:
+        print("Awake...")
+        for text in runVoiceKeyboard(key_controller.isComboPressed):
             text = formatter.process(text)
-            print("Sending to keyboard: ", text)
             key_controller.kb.type(text)
-        print("Going back to sleep.")
